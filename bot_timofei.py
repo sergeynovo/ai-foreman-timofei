@@ -10,8 +10,10 @@ from aiogram.enums import ParseMode
 
 from google import genai
 from google.genai import types as genai_types
+from dotenv import load_dotenv
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
+load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
