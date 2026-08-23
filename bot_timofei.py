@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 from google import genai
 from google.genai import types as genai_types
 from dotenv import load_dotenv
+from aiohttp import web
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
 load_dotenv()
@@ -43,6 +44,20 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
+
+# Простейший веб-сервер для обмана Render Health Check
+async def handle_ping(request):
+    return web.Response(text="Тимофей работает!")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render передает номер порта в переменную окружения PORT
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 # ================= 2. БАЗА ДАННЫХ (Память на 20 сообщений) =================
 def init_db():
@@ -258,7 +273,10 @@ async def main():
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     )
-    print("🚀 Бот Тимофей с реагированием на имя запущен!")
+    # Запускаем веб-сервер фоном
+    await start_dummy_server()
+
+    print("🚀 Бот Тимофей с реагированием на имя запущен на Web Service!")
     await dp.start_polling(bot)
 
 
