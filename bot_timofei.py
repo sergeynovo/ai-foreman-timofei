@@ -159,7 +159,7 @@ async def handle_text_messages(message: types.Message):
 
         try:
             response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
             )
@@ -194,7 +194,7 @@ async def handle_ask(message: types.Message):
 
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt,
             config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
         )
@@ -250,7 +250,7 @@ async def handle_media(message: types.Message):
         )
 
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=[uploaded_file, prompt],
             config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
         )
