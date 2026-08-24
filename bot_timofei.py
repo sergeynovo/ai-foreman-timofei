@@ -178,11 +178,17 @@ async def send_daily_summary():
 # На:
 #            report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + response.text
             if len(report) <= 4000:
-                await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+                if tid:
+                    await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+                else:
+                    await bot.send_message(chat_id=cid, text=report)
             else:
                 chunks = [report[i:i + 4000] for i in range(0, len(report), 4000)]
                 for chunk in chunks:
-                    await bot.send_message(chat_id=cid, text=chunk, message_thread_id=tid)
+                    if tid:
+                        await bot.send_message(chat_id=cid, text=chunk, message_thread_id=tid)
+                    else:
+                        await bot.send_message(chat_id=cid, text=chunk)
         except Exception as e:
             logging.error(f"Ошибка при генерации вечернего отчета: {e}")
 
@@ -216,7 +222,7 @@ async def send_long_message(message: types.Message, text: str, status_msg: types
 
     # Остальные части отправляем новыми сообщениями в тот же топик
     for chunk in chunks[1:]:
-        await message.answer(chunk, message_thread_id=message.message_thread_id)
+        await message.answer(chunk)
 
 async def process_media_file(bot: Bot, file_id: str, original_file_name: str) -> Optional[types.BufferedInputFile]:
     # 1. Извлекаем расширение файла (например, .pdf, .jpg, .docx)
