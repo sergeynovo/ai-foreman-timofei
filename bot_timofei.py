@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
+from aiogram.client.session.aiohttp import AiohttpSession
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
 load_dotenv()
@@ -374,10 +375,20 @@ async def handle_ask(message: types.Message):
     )
 
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+#        response = gemini_client.models.generate_content(
+#            model="gemini-3.6-flash",
+#            contents=prompt,
+#            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+#        )
+# Используем выполнение в отдельном потоке:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=[uploaded_file, prompt],
+                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+            )
         )
 
         save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
@@ -412,12 +423,22 @@ async def handle_text_messages(message: types.Message):
         )
 
         try:
-            response = gemini_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+# Вместо прямого вызова:
+#            response = gemini_client.models.generate_content(
+#                model="gemini-3.6-flash",
+#                contents=prompt,
+#                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+#            )
+# Используем выполнение в отдельном потоке:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: gemini_client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[uploaded_file, prompt],
+                    config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+                )
             )
-
             save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
 #            await status_msg.edit_text(response.text)
             await send_long_message(message, response.text, status_msg)
@@ -466,12 +487,22 @@ async def handle_media(message: types.Message):
             f"Комментарий к файлу: {user_caption}"
         )
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=[uploaded_file, prompt],
-            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+# Вместо прямого вызова:
+#        response = gemini_client.models.generate_content(
+#            model="gemini-3.6-flash",
+#            contents=[uploaded_file, prompt],
+#            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+#        )
+# Используем выполнение в отдельном потоке:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=[uploaded_file, prompt],
+                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+            )
         )
-
         user_name = message.from_user.full_name or "Пользователь"
         save_message(message.chat.id, user_name, f"[Отправил {media_type}]: {user_caption}")
         save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
@@ -497,9 +528,15 @@ async def main():
 
     await start_dummy_server()
 
-    print("🚀 Бот Тимофей запущен!")
-    await dp.start_polling(bot)
+    # Увеличиваем таймаут запросов к серверам Telegram до 120 секунд
+    session = AiohttpSession(timeout=120)
+    custom_bot = Bot(token=TELEGRAM_TOKEN, session=session)
 
+    print("🚀 Бот Тимофей запущен!")
+    
+    # Сбрасываем старые накопившиеся вебхуки/апдейты, чтобы не ловить таймауты при старте
+    await custom_bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(custom_bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
