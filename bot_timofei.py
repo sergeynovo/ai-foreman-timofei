@@ -3,6 +3,9 @@ import os
 import logging
 import sqlite3
 import re
+import mimetypes
+import uuid
+
 from datetime import datetime
 from typing import List, Optional
 
@@ -178,16 +181,46 @@ async def scheduled_reminder_task(chat_id: int, reminder_text: str, thread_id: O
 
 
 # ================= 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
-async def process_media_file(bot: Bot, file_id: str, file_name: str) -> str:
-    local_path = f"./temp_{file_id}_{file_name}"
-    file_info = await bot.get_file(file_id)
-    await bot.download_file(file_info.file_path, local_path)
-    
-    uploaded_file = gemini_client.files.upload(file=local_path)
-    if os.path.exists(local_path):
-        os.remove(local_path)
-    return uploaded_file
+async def process_media_file(bot: Bot, file_id: str, original_file_name: str) -> Optional[types.BufferedInputFile]:
+    # 1. Извлекаем расширение файла (например, .pdf, .jpg, .docx)
+    file_ext = os.path.splitext(original_file_name)[1]
+    if not file_ext:
+        file_ext = ".bin"
 
+    # 2. Генерируем чистое ASCII-имя для локального сохранения (исключает ошибки кодировки кириллицы)
+    safe_local_name = f"temp_{uuid.uuid4().hex}{file_ext}"
+    local_path = os.path.join(".", safe_local_name)
+
+    try:
+        # Получаем информацию о файле в Telegram
+        file_info = await bot.get_file(file_id)
+        
+        if file_info.file_size and file_info.file_size > 20 * 1024 * 1024:
+            raise ValueError("Размер файла превышает 20 МБ.")
+
+        # Скачиваем файл во временную директорию
+        await bot.download_file(file_info.file_path, local_path)
+
+        # Определяем MIME-тип файла для Gemini
+        mime_type, _ = mimetypes.guess_type(original_file_name)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        # Загружаем файл в Gemini File API с безопасным именем и указанием MIME-типа
+        uploaded_file = gemini_client.files.upload(
+            file=pathlib.Path(local_path),
+            config=genai_types.UploadFileConfig(
+                display_name=original_file_name.encode('utf-8', 'ignore').decode('utf-8'),
+                mime_type=mime_type
+            )
+        )
+        
+        return uploaded_file
+
+    finally:
+        # Гарантированное удаление временного файла
+        if os.path.exists(local_path):
+            os.remove(local_path)
 
 # ================= 5. ОБРАБОТЧИКИ СООБЩЕНИЙ =================
 
