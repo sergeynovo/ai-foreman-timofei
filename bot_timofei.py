@@ -5,6 +5,7 @@ import sqlite3
 import re
 import mimetypes
 import uuid
+import pathlib
 
 from datetime import datetime
 from typing import List, Optional
