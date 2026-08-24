@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 import sqlite3
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -14,6 +15,7 @@ from google.genai import types as genai_types
 from dotenv import load_dotenv
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime, timedelta
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
 load_dotenv()
@@ -207,26 +209,58 @@ async def handle_set_digest(message: types.Message):
     set_digest_thread(message.chat.id, thread_id)
     await message.reply("📌 **Отлично!** Тимофей зафиксировал этот топик и будет присылать вечерние отчеты в 19:00 прямо сюда.")
 
-
-# --- Команда постановки напоминаний ---
+# --- Усовершенствованная команда постановки напоминаний ---
 @dp.message(Command("remind"))
 async def handle_remind(message: types.Message):
-    args = message.text.replace("/remind", "").strip().split(" ", 1)
+    # Извлекаем текст после команды /remind
+    payload = message.text.replace("/remind", "").strip()
     
-    if len(args) < 2:
-        await message.reply("⚠️ **Неверный формат!** Используйте: `/remind HH:MM Текст напоминания`\nПример: `/remind 15:00 Привезти штукатурку`")
+    if not payload:
+        await message.reply(
+            "⚠️ **Неверный формат!** Используйте один из вариантов:\n\n"
+            "• `/remind 30m Текст` — через 30 минут (или `2h` — через 2 часа)\n"
+            "• `/remind 15:30 Текст` — в указанное время сегодня\n"
+            "• `/remind 25.08 10:00 Текст` — в конкретную дату и время"
+        )
         return
 
-    time_str, reminder_text = args[0], args[1]
+    parts = payload.split(" ", 1)
+    time_arg = parts[0].strip()
+    reminder_text = parts[1].strip() if len(parts) > 1 else "Без описания"
+
+    now = datetime.now()
+    run_datetime = None
 
     try:
-        now = datetime.now()
-        target_time = datetime.strptime(time_str, "%H:%M").time()
-        run_datetime = datetime.combine(now.date(), target_time)
+        # Вариант 1: Относительное время (например, 30m, 2h, 45m)
+        rel_match = re.match(r"^(\d+)([mhмч])$", time_arg.lower())
+        if rel_match:
+            amount = int(rel_match.group(1))
+            unit = rel_match.group(2)
+            if unit in ['m', 'м']:
+                run_datetime = now + timedelta(minutes=amount)
+            elif unit in ['h', 'ч']:
+                run_datetime = now + timedelta(hours=amount)
 
-        if run_datetime <= now:
-            run_datetime = run_datetime.replace(day=now.day + 1)
+        # Вариант 2: Точное время (например, 15:30)
+        elif ":" in time_arg and len(time_arg.split(":")) == 2:
+            target_time = datetime.strptime(time_arg, "%H:%M").time()
+            run_datetime = datetime.combine(now.date(), target_time)
+            if run_datetime <= now:
+                run_datetime += timedelta(days=1)  # Переносим на завтра, если время уже прошло
 
+        # Вариант 3: Дата и время (например, 25.08 10:00)
+        elif len(parts) > 1 and "." in time_arg:
+            full_date_str = f"{time_arg} {parts[1].split(' ')[0]}"
+            reminder_text = " ".join(parts[1].split(' ')[1:])
+            run_datetime = datetime.strptime(full_date_str, "%d.%m %H:%M").replace(year=now.year)
+            if run_datetime <= now:
+                run_datetime = run_datetime.replace(year=now.year + 1)
+
+        if not run_datetime:
+            raise ValueError("Нераспознанный формат времени")
+
+        # Добавляем задачу в планировщик APScheduler
         scheduler.add_job(
             scheduled_reminder_task,
             'date',
@@ -234,12 +268,22 @@ async def handle_remind(message: types.Message):
             args=[message.chat.id, reminder_text, message.message_thread_id]
         )
 
-        await message.reply(f"⏰ **Напоминание принято!**\nТимофей напомнит: «_{reminder_text}_» в **{run_datetime.strftime('%H:%M %d.%m')}**")
+        formatted_time = run_datetime.strftime("%H:%M (%d.%m)")
+        await message.reply(
+            f"⏰ **Напоминание принято!**\n"
+            f"Тимофей напомнит: «_{reminder_text}_»\n"
+            f"📅 **Время срабатывания:** {formatted_time}"
+        )
 
-    except ValueError:
-        await message.reply("❌ **Ошибка времени!** Укажите время в формате **ЧЧ:ММ** (например, 14:30).")
-
-
+    except Exception as e:
+        logging.error(f"Ошибка разбора /remind: {e}")
+        await message.reply(
+            "❌ **Ошибка в формате времени!**\n"
+            "Примеры использования:\n"
+            "• `/remind 45m Проверить затирку`\n"
+            "• `/remind 18:00 Встретить доставку`\n"
+            "• `/remind 28.08 12:00 Приедет замерщик`"
+        )
 # --- Команда /ask ---
 @dp.message(Command("ask"))
 async def handle_ask(message: types.Message):
