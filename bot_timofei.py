@@ -170,10 +170,20 @@ async def send_daily_summary():
                 config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
             )
             report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + response.text
-            await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+#            await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+# Замените:
+# await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+
+# На:
+#            report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + response.text
+            if len(report) <= 4000:
+                await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
+            else:
+                chunks = [report[i:i + 4000] for i in range(0, len(report), 4000)]
+                for chunk in chunks:
+                    await bot.send_message(chat_id=cid, text=chunk, message_thread_id=tid)
         except Exception as e:
             logging.error(f"Ошибка при генерации вечернего отчета: {e}")
-
 
 async def scheduled_reminder_task(chat_id: int, reminder_text: str, thread_id: Optional[int] = None):
     """Отправка запланированного напоминания."""
@@ -182,6 +192,31 @@ async def scheduled_reminder_task(chat_id: int, reminder_text: str, thread_id: O
 
 
 # ================= 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+async def send_long_message(message: types.Message, text: str, status_msg: types.Message = None):
+    """Отправляет длинный текст, разбивая его на части до 4000 символов."""
+    MAX_LENGTH = 4000
+    
+    # Если текст помещается в одно сообщение
+    if len(text) <= MAX_LENGTH:
+        if status_msg:
+            await status_msg.edit_text(text)
+        else:
+            await message.reply(text)
+        return
+
+    # Если текст длинный, разбиваем его на куски
+    chunks = [text[i:i + MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
+
+    # Обновляем первое статусные сообщение первой частью
+    if status_msg:
+        await status_msg.edit_text(chunks[0])
+    else:
+        await message.reply(chunks[0])
+
+    # Остальные части отправляем новыми сообщениями в тот же топик
+    for chunk in chunks[1:]:
+        await message.answer(chunk, message_thread_id=message.message_thread_id)
+
 async def process_media_file(bot: Bot, file_id: str, original_file_name: str) -> Optional[types.BufferedInputFile]:
     # 1. Извлекаем расширение файла (например, .pdf, .jpg, .docx)
     file_ext = os.path.splitext(original_file_name)[1]
@@ -346,7 +381,8 @@ async def handle_ask(message: types.Message):
         )
 
         save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
-        await status_msg.edit_text(response.text)
+#        await status_msg.edit_text(response.text)
+        await send_long_message(message, response.text, status_msg)
 
     except Exception as e:
         logging.error(f"Ошибка Gemini API: {e}")
@@ -383,7 +419,8 @@ async def handle_text_messages(message: types.Message):
             )
 
             save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
-            await status_msg.edit_text(response.text)
+#            await status_msg.edit_text(response.text)
+            await send_long_message(message, response.text, status_msg)
 
         except Exception as e:
             logging.error(f"Ошибка при ответе по имени: {e}")
@@ -439,7 +476,8 @@ async def handle_media(message: types.Message):
         save_message(message.chat.id, user_name, f"[Отправил {media_type}]: {user_caption}")
         save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
 
-        await status_msg.edit_text(response.text)
+#        await status_msg.edit_text(response.text)
+        await send_long_message(message, response.text, status_msg)
 
     except Exception as e:
         logging.error(f"Ошибка при обработке медиафайла: {e}")
