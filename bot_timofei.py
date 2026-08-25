@@ -6,21 +6,23 @@ import re
 import mimetypes
 import uuid
 import pathlib
+import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from google import genai
 from google.genai import types as genai_types
+from google.genai.errors import APIError
+
 from dotenv import load_dotenv
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime, timedelta
-from aiogram.client.session.aiohttp import AiohttpSession
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
 load_dotenv()
@@ -46,10 +48,9 @@ SYSTEM_INSTRUCTION = """
 2. Анализировать входящие документы (PDF, изображения, видео, аудио).
 3. Давать четкие, технически грамотные ответы по ремонту и защищать интересы владельца квартиры.
 4. Предупреждать о технических ошибках, нарушениях технологий или завышении смет.
+5. Ты также эксперт в области однофазной силовой и слаботочной электрики в квартирах, распределительных щитов.
+6. Ты эксперт в области умных домов, построенных на беспроводных технологиях с использованием протокола zigbee и локального управления с помощью Home Assistant.
 """
-# 5. Ты также эксперт в области однофазной силовой и слаботочной электрики в квартирах, распределительных щитов
-# 6. Ты эксперт в области умных домом, построенных на беспроводных технологиях с использованием протокола zigbee и локального управления с помощью Homeassistant
-
 
 # Инициализация клиентов
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -145,7 +146,36 @@ def get_active_chats_for_digest():
     return rows
 
 
-# ================= 3. СЛУЖБА УВЕДОМЛЕНИЙ И НАПОМИНАНИЙ =================
+# ================= 3. ВЫЗОВ GEMINI API С ОБРАБОТКОЙ ОШИБОК =================
+async def generate_gemini_response(contents, system_instruction: str) -> str:
+    """Безопасный вызов Gemini API с обработкой лимитов 429 и асинхронным выполнением."""
+    loop = asyncio.get_event_loop()
+
+    def _call_api():
+        return gemini_client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=contents,
+            config=genai_types.GenerateContentConfig(system_instruction=system_instruction)
+        )
+
+    try:
+        response = await loop.run_in_executor(None, _call_api)
+        return response.text
+    except APIError as e:
+        if e.code == 429:
+            logging.warning("Превышен лимит запросов Gemini API (429). Ожидание 10 сек...")
+            await asyncio.sleep(10)
+            try:
+                response = await loop.run_in_executor(None, _call_api)
+                return response.text
+            except Exception as retry_err:
+                logging.error(f"Повторный запрос после 429 завершился ошибкой: {retry_err}")
+                return "⚠️ **Лимит запросов к ИИ временно превышен.** Пожалуйста, подождите 1–2 минуты и повторите попытку."
+        else:
+            raise e
+
+
+# ================= 4. СЛУЖБА УВЕДОМЛЕНИЙ И НАПОМИНАНИЙ =================
 async def send_daily_summary():
     """Ежедневный вечерний отчет Тимофея в 19:00."""
     chats = get_active_chats_for_digest()
@@ -165,18 +195,9 @@ async def send_daily_summary():
         )
 
         try:
-            response = gemini_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-            )
-            report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + response.text
-#            await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
-# Замените:
-# await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
-
-# На:
-#            report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + response.text
+            ai_text = await generate_gemini_response(contents=prompt, system_instruction=SYSTEM_INSTRUCTION)
+            report = f"📋 **Вечерний отчет Тимофея ({datetime.now().strftime('%d.%m.%Y')})**\n\n" + ai_text
+            
             if len(report) <= 4000:
                 if tid:
                     await bot.send_message(chat_id=cid, text=report, message_thread_id=tid)
@@ -198,12 +219,11 @@ async def scheduled_reminder_task(chat_id: int, reminder_text: str, thread_id: O
     await bot.send_message(chat_id=chat_id, text=msg, message_thread_id=thread_id)
 
 
-# ================= 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+# ================= 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 async def send_long_message(message: types.Message, text: str, status_msg: types.Message = None):
     """Отправляет длинный текст, разбивая его на части до 4000 символов."""
     MAX_LENGTH = 4000
     
-    # Если текст помещается в одно сообщение
     if len(text) <= MAX_LENGTH:
         if status_msg:
             await status_msg.edit_text(text)
@@ -211,45 +231,37 @@ async def send_long_message(message: types.Message, text: str, status_msg: types
             await message.reply(text)
         return
 
-    # Если текст длинный, разбиваем его на куски
     chunks = [text[i:i + MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
 
-    # Обновляем первое статусные сообщение первой частью
     if status_msg:
         await status_msg.edit_text(chunks[0])
     else:
         await message.reply(chunks[0])
 
-    # Остальные части отправляем новыми сообщениями в тот же топик
     for chunk in chunks[1:]:
         await message.answer(chunk)
 
-async def process_media_file(bot: Bot, file_id: str, original_file_name: str) -> Optional[types.BufferedInputFile]:
-    # 1. Извлекаем расширение файла (например, .pdf, .jpg, .docx)
+async def process_media_file(bot: Bot, file_id: str, original_file_name: str):
+    """Безопасная загрузка медиафайла в Gemini API с использованием ASCII-имени."""
     file_ext = os.path.splitext(original_file_name)[1]
     if not file_ext:
         file_ext = ".bin"
 
-    # 2. Генерируем чистое ASCII-имя для локального сохранения (исключает ошибки кодировки кириллицы)
     safe_local_name = f"temp_{uuid.uuid4().hex}{file_ext}"
     local_path = os.path.join(".", safe_local_name)
 
     try:
-        # Получаем информацию о файле в Telegram
         file_info = await bot.get_file(file_id)
         
         if file_info.file_size and file_info.file_size > 20 * 1024 * 1024:
             raise ValueError("Размер файла превышает 20 МБ.")
 
-        # Скачиваем файл во временную директорию
         await bot.download_file(file_info.file_path, local_path)
 
-        # Определяем MIME-тип файла для Gemini
         mime_type, _ = mimetypes.guess_type(original_file_name)
         if not mime_type:
             mime_type = "application/octet-stream"
 
-        # Загружаем файл в Gemini File API с безопасным именем и указанием MIME-типа
         uploaded_file = gemini_client.files.upload(
             file=pathlib.Path(local_path),
             config=genai_types.UploadFileConfig(
@@ -257,15 +269,14 @@ async def process_media_file(bot: Bot, file_id: str, original_file_name: str) ->
                 mime_type=mime_type
             )
         )
-        
         return uploaded_file
 
     finally:
-        # Гарантированное удаление временного файла
         if os.path.exists(local_path):
             os.remove(local_path)
 
-# ================= 5. ОБРАБОТЧИКИ СООБЩЕНИЙ =================
+
+# ================= 6. ОБРАБОТЧИКИ СООБЩЕНИЙ =================
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -279,17 +290,15 @@ async def start_cmd(message: types.Message):
     )
 
 
-# --- Команда фиксации топика для дайджеста ---
 @dp.message(Command("set_digest"))
 async def handle_set_digest(message: types.Message):
     thread_id = message.message_thread_id
     set_digest_thread(message.chat.id, thread_id)
     await message.reply("📌 **Отлично!** Тимофей зафиксировал этот топик и будет присылать вечерние отчеты в 19:00 прямо сюда.")
 
-# --- Усовершенствованная команда постановки напоминаний ---
+
 @dp.message(Command("remind"))
 async def handle_remind(message: types.Message):
-    # Извлекаем текст после команды /remind
     payload = message.text.replace("/remind", "").strip()
     
     if not payload:
@@ -309,7 +318,6 @@ async def handle_remind(message: types.Message):
     run_datetime = None
 
     try:
-        # Вариант 1: Относительное время (например, 30m, 2h, 45m)
         rel_match = re.match(r"^(\d+)([mhмч])$", time_arg.lower())
         if rel_match:
             amount = int(rel_match.group(1))
@@ -319,14 +327,12 @@ async def handle_remind(message: types.Message):
             elif unit in ['h', 'ч']:
                 run_datetime = now + timedelta(hours=amount)
 
-        # Вариант 2: Точное время (например, 15:30)
         elif ":" in time_arg and len(time_arg.split(":")) == 2:
             target_time = datetime.strptime(time_arg, "%H:%M").time()
             run_datetime = datetime.combine(now.date(), target_time)
             if run_datetime <= now:
-                run_datetime += timedelta(days=1)  # Переносим на завтра, если время уже прошло
+                run_datetime += timedelta(days=1)
 
-        # Вариант 3: Дата и время (например, 25.08 10:00)
         elif len(parts) > 1 and "." in time_arg:
             full_date_str = f"{time_arg} {parts[1].split(' ')[0]}"
             reminder_text = " ".join(parts[1].split(' ')[1:])
@@ -337,7 +343,6 @@ async def handle_remind(message: types.Message):
         if not run_datetime:
             raise ValueError("Нераспознанный формат времени")
 
-        # Добавляем задачу в планировщик APScheduler
         scheduler.add_job(
             scheduled_reminder_task,
             'date',
@@ -361,7 +366,8 @@ async def handle_remind(message: types.Message):
             "• `/remind 18:00 Встретить доставку`\n"
             "• `/remind 28.08 12:00 Приедет замерщик`"
         )
-# --- Команда /ask ---
+
+
 @dp.message(Command("ask"))
 async def handle_ask(message: types.Message):
     user_query = message.text.replace("/ask", "").strip()
@@ -381,32 +387,15 @@ async def handle_ask(message: types.Message):
     )
 
     try:
-#        response = gemini_client.models.generate_content(
-#            model="gemini-3.6-flash",
-#            contents=prompt,
-#            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-#        )
-# Используем выполнение в отдельном потоке:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: gemini_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=[uploaded_file, prompt],
-                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-            )
-        )
-
-        save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
-#        await status_msg.edit_text(response.text)
-        await send_long_message(message, response.text, status_msg)
+        response_text = await generate_gemini_response(contents=prompt, system_instruction=SYSTEM_INSTRUCTION)
+        save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response_text)
+        await send_long_message(message, response_text, status_msg)
 
     except Exception as e:
         logging.error(f"Ошибка Gemini API: {e}")
         await status_msg.edit_text("❌ Произошла ошибка при обработке запроса.")
 
 
-# --- Обработка обычного текста (Фильтр по имени Тимофей + запись в базу) ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_messages(message: types.Message):
     user_name = message.from_user.full_name or "Пользователь"
@@ -429,32 +418,15 @@ async def handle_text_messages(message: types.Message):
         )
 
         try:
-# Вместо прямого вызова:
-#            response = gemini_client.models.generate_content(
-#                model="gemini-3.6-flash",
-#                contents=prompt,
-#                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-#            )
-# Используем выполнение в отдельном потоке:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: gemini_client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[uploaded_file, prompt],
-                    config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-                )
-            )
-            save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
-#            await status_msg.edit_text(response.text)
-            await send_long_message(message, response.text, status_msg)
+            response_text = await generate_gemini_response(contents=prompt, system_instruction=SYSTEM_INSTRUCTION)
+            save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response_text)
+            await send_long_message(message, response_text, status_msg)
 
         except Exception as e:
             logging.error(f"Ошибка при ответе по имени: {e}")
             await status_msg.edit_text("❌ Извините, не удалось сформировать ответ.")
 
 
-# --- Обработка медиафайлов ---
 @dp.message(F.document | F.photo | F.video | F.voice)
 async def handle_media(message: types.Message):
     status_msg = await message.reply("📥 *Тимофей изучает медиафайл...*", parse_mode=ParseMode.MARKDOWN)
@@ -479,49 +451,43 @@ async def handle_media(message: types.Message):
             file_id = message.voice.file_id
             file_name = "voice.ogg"
             media_type = "голосовое сообщение"
+        else:
+            await status_msg.edit_text("❌ Неподдерживаемый тип файла.")
+            return
 
         uploaded_file = await process_media_file(bot, file_id, file_name)
 
-        context_history = get_recent_history(message.chat.id, limit=20)
+        context_history = get_recent_history(message.chat.id, limit=5)
         user_caption = message.caption if message.caption else "Тимофей, проанализируй этот файл в контексте нашего ремонта."
 
         prompt = (
-            f"--- ИСТОРИЯ ЧАТА (ПОСЛЕДНИЕ 20 СООБЩЕНИЙ) ---\n"
+            f"--- ИСТОРИЯ ЧАТА (ПОСЛЕДНИЕ 5 СООБЩЕНИЙ) ---\n"
             f"{context_history}\n"
             f"---------------------------------------------\n\n"
             f"Пользователь прислал {media_type}.\n"
             f"Комментарий к файлу: {user_caption}"
         )
 
-# Вместо прямого вызова:
-#        response = gemini_client.models.generate_content(
-#            model="gemini-3.6-flash",
-#            contents=[uploaded_file, prompt],
-#            config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-#        )
-# Используем выполнение в отдельном потоке:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: gemini_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=[uploaded_file, prompt],
-                config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-            )
+        response_text = await generate_gemini_response(
+            contents=[uploaded_file, prompt],
+            system_instruction=SYSTEM_INSTRUCTION
         )
+
         user_name = message.from_user.full_name or "Пользователь"
         save_message(message.chat.id, user_name, f"[Отправил {media_type}]: {user_caption}")
-        save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response.text)
+        save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response_text)
 
-#        await status_msg.edit_text(response.text)
-        await send_long_message(message, response.text, status_msg)
+        await send_long_message(message, response_text, status_msg)
 
+    except ValueError as ve:
+        logging.warning(f"Ошибка размера файла: {ve}")
+        await status_msg.edit_text(f"⚠️ **Ошибка загрузки:** {ve}\nОтправьте документ размером менее 20 МБ.")
     except Exception as e:
-        logging.error(f"Ошибка при обработке медиафайла: {e}")
-        await status_msg.edit_text("❌ Не удалось обработать медиафайл.")
+        logging.error(f"Ошибка при обработке медиафайла: {e}", exc_info=True)
+        await status_msg.edit_text("❌ Не удалось обработать медиафайл. Проверьте размер и формат (поддерживаются PDF, JPG, PNG, MP4, MP3, OGG).")
 
 
-# ================= 6. ТОЧКА ВХОДА =================
+# ================= 7. ТОЧКА ВХОДА =================
 async def main():
     init_db()
     logging.basicConfig(
@@ -534,13 +500,11 @@ async def main():
 
     await start_dummy_server()
 
-    # Увеличиваем таймаут запросов к серверам Telegram до 120 секунд
     session = AiohttpSession(timeout=120)
     custom_bot = Bot(token=TELEGRAM_TOKEN, session=session)
 
     print("🚀 Бот Тимофей запущен!")
     
-    # Сбрасываем старые накопившиеся вебхуки/апдейты, чтобы не ловить таймауты при старте
     await custom_bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(custom_bot)
 
