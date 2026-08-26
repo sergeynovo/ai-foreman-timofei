@@ -501,8 +501,8 @@ async def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     )
 
-    scheduler.add_job(s
-        end_daily_summary, 
+    scheduler.add_job(
+        send_daily_summary, 
         'cron',
         hour=19, 
         minute=0,
