@@ -32,6 +32,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
+MEDIA_THREAD_ID = os.getenv("MEDIA_THREAD_ID")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Ошибка: не задана переменная окружения TELEGRAM_TOKEN!")
@@ -42,6 +43,7 @@ if not GEMINI_API_KEY:
 if not DATABASE_URL:
     raise ValueError("Ошибка: не задана переменная окружения DATABASE_URL!")
 
+MEDIA_THREAD_ID = int(MEDIA_THREAD_ID) if MEDIA_THREAD_ID else None
 
 # Имена/триггеры, на которые реагирует бот
 BOT_NAMES = ["тимофей", "ии-прораб", "тимофей,", "тимофей!"]
@@ -452,10 +454,10 @@ async def handle_text_messages(message: types.Message):
             logging.error(f"Ошибка при ответе по имени: {e}")
             await status_msg.edit_text("❌ Извините, не удалось сформировать ответ.")
 
-
 @dp.message(F.document | F.photo | F.video | F.voice)
 async def handle_media(message: types.Message):
-    status_msg = await message.reply("📥 *Тимофей изучает медиафайл...*", parse_mode=ParseMode.MARKDOWN)
+    # Уведомляем в исходном чате/топике, что файл принят
+    status_msg = await message.reply("📥 *Тимофей принял файл и готовит разбор...*", parse_mode=ParseMode.MARKDOWN)
     
     uploaded_file = None
     media_type = "файл"
@@ -490,7 +492,7 @@ async def handle_media(message: types.Message):
             f"--- ИСТОРИЯ ЧАТА (ПОСЛЕДНИЕ 5 СООБЩЕНИЙ) ---\n"
             f"{context_history}\n"
             f"---------------------------------------------\n\n"
-            f"Пользователь прислал {media_type}.\n"
+            f"Пользователь {message.from_user.full_name} прислал {media_type}.\n"
             f"Комментарий к файлу: {user_caption}"
         )
 
@@ -503,14 +505,63 @@ async def handle_media(message: types.Message):
         save_message(message.chat.id, user_name, f"[Отправил {media_type}]: {user_caption}")
         save_message(message.chat.id, "Тимофей (ИИ-Прораб)", response_text)
 
-        await send_long_message(message, response_text, status_msg)
+        # Формируем текст разбора
+        full_response = (
+            f"📁 **Разбор файла от {user_name}**\n"
+            f"📎 **Тип:** {media_type}\n"
+            f"💬 **Комментарий:** _{user_caption}_\n\n"
+            f"{response_text}"
+        )
+
+        # Определяем целевой топик: MEDIA_THREAD_ID (если задан) или исходный топик
+        target_thread = MEDIA_THREAD_ID if MEDIA_THREAD_ID else message.message_thread_id
+
+        # 1. Отправляем разбор в целевой топик с помощью send_long_message
+        if MEDIA_THREAD_ID and MEDIA_THREAD_ID != message.message_thread_id:
+            # Если целевой топик отличается от текущего, создаем первое сообщение
+            # напрямую через bot.send_message, чтобы передать target_thread и получить message_id для ссылки
+            chunks = [full_response[i:i + 4000] for i in range(0, len(full_response), 4000)]
+            
+            first_sent_msg = await bot.send_message(
+                chat_id=message.chat.id,
+                text=chunks[0],
+                message_thread_id=target_thread
+            )
+            
+            # Если разбор длиннее 4000 символов, отправляем оставшиеся части
+            for chunk in chunks[1:]:
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    text=chunk,
+                    message_thread_id=target_thread
+                )
+
+            # Формируем ссылку на первое отправленное сообщение
+            chat_id_str = str(message.chat.id)
+            if message.chat.username:
+                link = f"https://t.me/{message.chat.username}/{first_sent_msg.message_id}"
+            else:
+                clean_chat_id = chat_id_str.replace("-100", "")
+                link = f"https://t.me/c/{clean_chat_id}/{first_sent_msg.message_id}"
+
+            # Обновляем временный статус в исходном топике на ссылку
+            await status_msg.edit_text(
+                f"✅ **Разбор файла готов!**\n"
+                f"👉 [Перейти к разбору в папку медиафайлов]({link})",
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True
+            )
+        else:
+            # Если специальный топик не задан или равен исходному,
+            # используем send_long_message напрямую для редактирования status_msg
+            await send_long_message(message, full_response, status_msg)
 
     except ValueError as ve:
         logging.warning(f"Ошибка размера файла: {ve}")
         await status_msg.edit_text(f"⚠️ **Ошибка загрузки:** {ve}\nОтправьте документ размером менее 20 МБ.")
     except Exception as e:
         logging.error(f"Ошибка при обработке медиафайла: {e}", exc_info=True)
-        await status_msg.edit_text("❌ Не удалось обработать медиафайл. Проверьте размер и формат (поддерживаются PDF, JPG, PNG, MP4, MP3, OGG).")
+        await status_msg.edit_text("❌ Не удалось обработать медиафайл. Проверьте размер и формат.")
 
 @dp.message(Command("id", "debug"))
 async def handle_debug_id(message: types.Message):
@@ -524,7 +575,7 @@ async def handle_debug_id(message: types.Message):
     )
 
     await message.reply(text, parse_mode=ParseMode.MARKDOWN)
-    
+
 # ================= 7. ТОЧКА ВХОДА =================
 async def main():
     init_db()
