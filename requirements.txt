@@ -3,3 +3,5 @@ google-genai
 python-dotenv
 aiohttp
 apscheduler
+psycopg2-binary
+asyncpg

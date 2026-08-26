@@ -7,6 +7,8 @@ import mimetypes
 import uuid
 import pathlib
 import time
+import psycopg2
+import asyncpg
 
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -29,13 +31,17 @@ from zoneinfo import ZoneInfo
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Ошибка: не задана переменная окружения TELEGRAM_TOKEN!")
 if not GEMINI_API_KEY:
     raise ValueError("Ошибка: не задана переменная окружения GEMINI_API_KEY!")
 
-DB_NAME = "repair_memory.db"
+# DB_NAME = "repair_memory.db"
+if not DATABASE_URL:
+    raise ValueError("Ошибка: не задана переменная окружения DATABASE_URL!")
+
 
 # Имена/триггеры, на которые реагирует бот
 BOT_NAMES = ["тимофей", "ии-прораб", "тимофей,", "тимофей!"]
@@ -76,61 +82,76 @@ async def start_dummy_server():
     await site.start()
 
 
-# ================= 2. БАЗА ДАННЫХ =================
+# ================= 2. БАЗА ДАННЫХ (PostgreSQL / Neon) =================
 def init_db():
-    """Инициализация SQLite базы данных."""
-    conn = sqlite3.connect(DB_NAME)
+    """Инициализация таблиц в PostgreSQL при старте приложения."""
+    # Преобразуем URL для psycopg2, если он начинается с postgres:// (случай некоторых хостингов)
+    db_url = DATABASE_URL.replace("postgres://", "postgresql://")
+    
+    conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
+    
+    # Таблица истории сообщений
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT,
             user_name TEXT,
             message_text TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
+    
+    # Таблица активных чатов для дайджеста
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS active_chats (
-            chat_id INTEGER PRIMARY KEY,
-            digest_thread_id INTEGER
-        )
+            chat_id BIGINT PRIMARY KEY,
+            digest_thread_id BIGINT
+        );
     """)
+    
     conn.commit()
+    cursor.close()
     conn.close()
-
 
 def save_message(chat_id: int, user_name: str, text: str):
     """Сохранение сообщения в историю."""
-    conn = sqlite3.connect(DB_NAME)
+    db_url = DATABASE_URL.replace("postgres://", "postgresql://")
+    conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO chat_history (chat_id, user_name, message_text) VALUES (?, ?, ?)", (chat_id, user_name, text))
+    cursor.execute(
+        "INSERT INTO chat_history (chat_id, user_name, message_text) VALUES (%s, %s, %s)",
+        (chat_id, user_name, text)
+    )
     conn.commit()
+    cursor.close()
     conn.close()
-
 
 def set_digest_thread(chat_id: int, thread_id: Optional[int]):
     """Фиксация chat_id и thread_id для отправки вечернего дайджеста."""
-    conn = sqlite3.connect(DB_NAME)
+    db_url = DATABASE_URL.replace("postgres://", "postgresql://")
+    conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO active_chats (chat_id, digest_thread_id) VALUES (?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET digest_thread_id=excluded.digest_thread_id
+        INSERT INTO active_chats (chat_id, digest_thread_id) VALUES (%s, %s)
+        ON CONFLICT(chat_id) DO UPDATE SET digest_thread_id = EXCLUDED.digest_thread_id
     """, (chat_id, thread_id))
     conn.commit()
+    cursor.close()
     conn.close()
-
 
 def get_recent_history(chat_id: int, limit: int = 20) -> str:
     """Извлечение последних N сообщений из базы данных."""
-    conn = sqlite3.connect(DB_NAME)
+    db_url = DATABASE_URL.replace("postgres://", "postgresql://")
+    conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT user_name, message_text FROM (
-            SELECT user_name, message_text, id FROM chat_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?
-        ) ORDER BY id ASC
+            SELECT user_name, message_text, id FROM chat_history WHERE chat_id = %s ORDER BY id DESC LIMIT %s
+        ) sub ORDER BY id ASC
     """, (chat_id, limit))
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
     
     if not rows:
@@ -138,16 +159,16 @@ def get_recent_history(chat_id: int, limit: int = 20) -> str:
         
     return "\n".join([f"{user}: {text}" for user, text in rows])
 
-
 def get_active_chats_for_digest():
     """Получение всех сохраненных чатов и привязанных топиков."""
-    conn = sqlite3.connect(DB_NAME)
+    db_url = DATABASE_URL.replace("postgres://", "postgresql://")
+    conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
     cursor.execute("SELECT chat_id, digest_thread_id FROM active_chats")
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
     return rows
-
 
 # ================= 3. ВЫЗОВ GEMINI API С ОБРАБОТКОЙ ОШИБОК =================
 async def generate_gemini_response(contents, system_instruction: str) -> str:
@@ -176,7 +197,6 @@ async def generate_gemini_response(contents, system_instruction: str) -> str:
                 return "⚠️ **Лимит запросов к ИИ временно превышен.** Пожалуйста, подождите 1–2 минуты и повторите попытку."
         else:
             raise e
-
 
 # ================= 4. СЛУЖБА УВЕДОМЛЕНИЙ И НАПОМИНАНИЙ =================
 async def send_daily_summary():
