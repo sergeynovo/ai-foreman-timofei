@@ -512,7 +512,19 @@ async def handle_media(message: types.Message):
         logging.error(f"Ошибка при обработке медиафайла: {e}", exc_info=True)
         await status_msg.edit_text("❌ Не удалось обработать медиафайл. Проверьте размер и формат (поддерживаются PDF, JPG, PNG, MP4, MP3, OGG).")
 
+@dp.message(Command("id", "debug"))
+async def handle_debug_id(message: types.Message):
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
 
+    text = (
+        f"🔍 **Отладочная информация:**\n\n"
+        f"🆔 **Chat ID:** `{chat_id}`\n"
+        f"📌 **Message Thread ID (ID топика):** `{thread_id}`"
+    )
+
+    await message.reply(text, parse_mode=ParseMode.MARKDOWN)
+    
 # ================= 7. ТОЧКА ВХОДА =================
 async def main():
     init_db()
