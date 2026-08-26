@@ -23,6 +23,7 @@ from google.genai.errors import APIError
 from dotenv import load_dotenv
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from zoneinfo import ZoneInfo
 
 # ================= 1. КОНФИГУРАЦИЯ И СЕКРЕТЫ =================
 load_dotenv()
@@ -316,7 +317,10 @@ async def handle_remind(message: types.Message):
     time_arg = parts[0].strip()
     reminder_text = parts[1].strip() if len(parts) > 1 else "Без описания"
 
-    now = datetime.now()
+#    now = datetime.now()
+    tz_moscow = ZoneInfo("Europe/Moscow")
+    now = datetime.now(tz_moscow)
+
     run_datetime = None
 
     try:
@@ -331,7 +335,7 @@ async def handle_remind(message: types.Message):
 
         elif ":" in time_arg and len(time_arg.split(":")) == 2:
             target_time = datetime.strptime(time_arg, "%H:%M").time()
-            run_datetime = datetime.combine(now.date(), target_time)
+            run_datetime = datetime.combine(now.date(), target_time, tzinfo=tz_moscow)
             if run_datetime <= now:
                 run_datetime += timedelta(days=1)
 
@@ -497,7 +501,13 @@ async def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     )
 
-    scheduler.add_job(send_daily_summary, 'cron', hour=19, minute=0)
+    scheduler.add_job(s
+        end_daily_summary, 
+        'cron',
+        hour=19, 
+        minute=0,
+        timezone=ZoneInfo("Europe/Moscow")
+    )
     scheduler.start()
 
     await start_dummy_server()
