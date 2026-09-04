@@ -179,7 +179,7 @@ async def generate_gemini_response(contents, system_instruction: str) -> str:
 
     def _call_api():
         return gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-3.7-flash",
             contents=contents,
             config=genai_types.GenerateContentConfig(system_instruction=system_instruction)
         )
